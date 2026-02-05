@@ -1,0 +1,56 @@
+ANDERSSOUZA60_menu - Anderson Marinho de Souza
+
+
+  z_WTW_InclusaoSaudeE
+Tornar PRIVADO
+
+
+  Ler Conveniados_e_Dependentes
+    Onde Conveniados_e_Dependentes.Data_de_Cancelamento >= [DataCanc,Today]
+  Ler Convênio de Conveniados_e_Dependentes
+    Onde Convênio.Código >= [Saude,25]
+    E Convênio.Código <= [Odonto,32]
+  Ler Pessoa_Física de Conveniados_e_Dependentes
+  Ler Empregado de Conveniados_e_Dependentes
+    Onde Empregado.Data_da_Admissão >= [AdmEn,01/01/2026]
+    OU Empregado.Matrícula = [Mat,9999999]
+
+
+  Empregado.Empresa - Razão Social
+  Empregado.Data da Admissão
+  Conveniados_e_Dependentes.Data Opção
+  Convênio.Nome
+  Empregado.Matrícula
+  Pessoa_Física.Nome
+  Conveniados_e_Dependentes.Nome
+  Conveniados_e_Dependentes.Parentesco
+  Conveniados_e_Dependentes.Data de Nascimento
+  Conveniados_e_Dependentes.EstadoCivil
+  Conveniados_e_Dependentes.CPF
+  Conveniados_e_Dependentes.NomeMae
+  Pessoa_Física.Endereço - Logradouro
+  Pessoa_Física.Endereço - Número
+  Pessoa_Física.Endereço - Complemento
+  Pessoa_Física.Endereço - Bairro
+  Pessoa_Física.Endereço - Município Nome
+  Pessoa_Física.Endereço - UF
+  Pessoa_Física.Endereço - CEP
+  Empregado.Banco - Código BACEN
+  Empregado.Agência Bancária - Cód BACEN
+  Empregado.Conta Bancária - Código
+  Empregado.Conta Bancária - Díg Verific
+  Empregado.Situação do Empregado - Status
+  Convênio.Código
+  Convênio.Ativo
+  Conveniados_e_Dependentes.Data de Cancelamento
+  Conveniados_e_Dependentes.Dependente de IRRF
+  Conveniados_e_Dependentes.Inativo Desde
+  Conveniados_e_Dependentes.Frequenta Creche
+  Conveniados_e_Dependentes.Número Sequencial
+  Conveniados_e_Dependentes.Sexo
+  Empregado.Função - Nome
+  Pessoa_Física.E-Mail
+  Pessoa_Física.Email Alternativo
+  Pessoa_Física.Telefone
+
+Fórmulas :
