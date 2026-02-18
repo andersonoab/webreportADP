@@ -1,0 +1,77 @@
+
+
+
+ z_SST_Essence_v1
+Tornar PRIVADO
+
+
+  Ler Pessoa_Física
+  Ler Empregado de Pessoa_Física
+  Ler Estabelecimento de Empregado
+  Ler Histórico_Rescisão de Empregado
+    Onde Histórico_Rescisão.Data_Afastamento >= [Data_Dem,12/31/2099]
+
+
+  Pessoa_Física.Nome
+  Estabelecimento.Nome Comercial
+  Estabelecimento.CNPJ
+  Pessoa_Física.Data de Nascimento
+  Pessoa_Física.Identidade
+  Pessoa_Física.CPF
+  Pessoa_Física.Sexo
+  Pessoa_Física.Estado Civil - Nome
+  Empregado.Razao Social Empresa Origem
+  Estabelecimento.Código
+  Pessoa_Física.Deficiência
+  Pessoa_Física.Descrição da Deficiência
+  Empregado.Função - Nome
+  Empregado.Centro de Resultado - Nome
+  Empregado.Data da Admissão
+  Estabelecimento.Nome Município Estabelecimento
+  Estabelecimento.Endereço - UF
+  Empregado.Centro de Resultado - Código
+  Empregado.Situação sem Data
+  Empregado.Matrícula
+  Pessoa_Física.Nome da Mãe
+  Pessoa_Física.CTPS Nro
+  Pessoa_Física.CTPS Série
+  Pessoa_Física.Data Expedição CTPS
+  Pessoa_Física.CTPS UF
+  Pessoa_Física.Identidade - Órgão
+  Pessoa_Física.Ident - Dt Expedição
+  Pessoa_Física.Identidade - UF
+  Pessoa_Física.PIS
+  Pessoa_Física.Endereço - Logradouro
+  Pessoa_Física.Endereço - Bairro
+  Pessoa_Física.Endereço - CEP
+  Pessoa_Física.Endereço - Município Nome
+  Pessoa_Física.Endereço - UF
+  Pessoa_Física.Telefone
+  Empregado.Função - Código
+  Empregado.Desconta INSS
+  Pessoa_Física.Aposentado
+  Estabelecimento.Empresa - Código
+  Empregado.Modo Ponto
+  Pessoa_Física.Periodicidade Exame Médico
+  Empregado.Tempo de Serviço
+  Empregado.ID SONOVA
+  Empregado.Ultimo Afastamento - Data Afas
+  Empregado.Ultimo Afastamento - Data Ret
+  Empregado.Idade
+  Empregado.Cargo - Nome
+  Histórico_Rescisão.Data Afastamento
+  Empregado.Desligado
+  Histórico_Rescisão.Nro Dias Aviso
+  Histórico_Rescisão.Data Fim Aviso Previo Ind
+  Empregado.Matrícula eSocial
+  Empregado.Vínculo Empregatício - Nome
+  Pessoa_Física.Nome do Pai
+  Empregado.Sigla do Afastamento
+  Pessoa_Física.E-Mail
+  Pessoa_Física.Email Alternativo
+  Empregado.Horário
+  Empregado.Chefia Imediata - Cód Estab
+  Empregado.Chefia Imediata - Matrícula
+  Empregado.Chefia Imediata - Nome
+  Empregado.Centro de custo Suíça/Novo
+  Pessoa_Física.Apelido
