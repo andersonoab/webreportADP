@@ -1,0 +1,1238 @@
+Option Explicit
+
+' ============================================================
+' CONFIG
+' ============================================================
+
+Private Const CAMINHO_EXCEL As String = "C:\_RPA\AppMacro\_email_rh.xlsx"
+
+Private Const OUTLOOK_FOLDER_BASE As String = "DP_TRIAGEM_PAGAMENTOS"
+Private Const OUTLOOK_FOLDER_REG As String = "REGISTRADOS"
+Private Const OUTLOOK_FOLDER_FAIL As String = "FALHAS"
+
+Private Const GANTT_SHEET_NAME As String = "GANTT"
+
+' ============================================================
+' ENTRADA PRINCIPAL
+' ============================================================
+Public Sub aayMapearEmails_DP()
+
+    On Error GoTo TrataErro
+
+    Dim exp As Outlook.Explorer
+    Dim sel As Outlook.Selection
+    Dim folder As Outlook.folder
+
+    Set exp = Application.ActiveExplorer
+    If Not exp Is Nothing Then
+        Set sel = exp.Selection
+        Set folder = exp.CurrentFolder
+    End If
+
+    ' 1) Se tem seleção: perguntar se é massivo ou individual
+    If Not sel Is Nothing Then
+        If sel.Count > 0 Then
+            Dim modo As VbMsgBoxResult
+            modo = MsgBox( _
+                "Você selecionou " & sel.Count & " e-mail(s)." & vbCrLf & vbCrLf & _
+                "Sim = Classificar em lote (mesmo Tipo/Fornecedor para todos)" & vbCrLf & _
+                "Não = Classificar individualmente (pergunta Tipo/Fornecedor para cada e-mail)", _
+                vbYesNo + vbQuestion, "Modo de classificação")
+
+            If modo = vbYes Then
+                ProcessarSelecao_Massivo sel
+            Else
+                ProcessarSelecao_Individual sel
+            End If
+
+            MsgBox "Concluído.", vbInformation
+            Exit Sub
+        End If
+    End If
+
+    ' 2) Se não tem seleção -> tenta e-mail aberto
+    Dim insp As Outlook.Inspector
+    Dim currentItem As Object
+
+    Set insp = Application.ActiveInspector
+    If Not insp Is Nothing Then
+        Set currentItem = insp.currentItem
+        If Not currentItem Is Nothing Then
+            If TypeOf currentItem Is Outlook.MailItem Then
+                If MsgBox("Não há seleção. Deseja mapear o e-mail aberto agora?", vbYesNo + vbQuestion, "Mapear e-mail aberto") = vbYes Then
+                    ProcessarUmMail_Individual CTypeMail(currentItem)
+                    MsgBox "Concluído.", vbInformation
+                    Exit Sub
+                End If
+            End If
+        End If
+    End If
+
+    ' 3) Se não tem seleção nem e-mail aberto -> pergunta se quer mapear todos da pasta atual (individual)
+    If folder Is Nothing Then
+        MsgBox "Não identifiquei a pasta atual no Outlook.", vbCritical
+        Exit Sub
+    End If
+
+    Dim resp As VbMsgBoxResult
+    resp = MsgBox("Nenhum e-mail selecionado." & vbCrLf & _
+                  "Deseja mapear TODOS os e-mails da pasta atual?" & vbCrLf & vbCrLf & _
+                  "Pasta: " & folder.folderPath & vbCrLf & vbCrLf & _
+                  "Atenção: este modo pergunta Tipo/Fornecedor para cada e-mail.", _
+                  vbYesNo + vbQuestion, "Mapear todos da pasta")
+
+    If resp = vbYes Then
+        ProcessarPastaCompleta_Individual folder
+        MsgBox "Concluído.", vbInformation
+    Else
+        MsgBox "Operação cancelada.", vbInformation
+    End If
+
+    Exit Sub
+
+TrataErro:
+    MsgBox "Erro " & Err.Number & ": " & Err.Description, vbCritical
+End Sub
+
+' ============================================================
+' MASSIVO: SELEÇÃO
+' ============================================================
+Private Sub ProcessarSelecao_Massivo(ByVal sel As Outlook.Selection)
+
+    On Error GoTo TrataErro
+
+    Dim xlApp As Object, xlWb As Object
+    Dim wsEmails As Object, wsChecklist As Object, wsDom As Object
+    Dim excelCriado As Boolean
+
+    Set xlApp = GetExcelApp(excelCriado)
+    xlApp.Visible = False
+    xlApp.DisplayAlerts = False
+
+    Set xlWb = xlApp.Workbooks.Open(CAMINHO_EXCEL)
+
+    Set wsEmails = EnsureSheet(xlWb, "EMAILS")
+    Set wsChecklist = EnsureSheet(xlWb, "CHECKLIST")
+    Set wsDom = EnsureSheet(xlWb, "DOMINIOS")
+
+    EnsureHeadersEmails wsEmails
+    EnsureHeadersChecklist wsChecklist
+    EnsureHeadersDominios wsDom
+
+    Dim preview As String
+    preview = BuildPreviewFromSelection(sel, 15)
+
+    Dim tipo As String, fornecedor As String
+    tipo = PromptTipo("LOTE", "Seleção (" & sel.Count & " e-mails)" & vbCrLf & vbCrLf & preview)
+    fornecedor = PromptFornecedor("LOTE", "Seleção (" & sel.Count & " e-mails)" & vbCrLf & vbCrLf & preview)
+
+    If Trim$(tipo) = "" Then tipo = "OUTROS"
+    If Trim$(fornecedor) = "" Then fornecedor = "N/I"
+
+    Dim obj As Object
+    For Each obj In sel
+        If TypeOf obj Is Outlook.MailItem Then
+            ProcessarUmMail_Massivo CTypeMail(obj), wsEmails, wsChecklist, tipo, fornecedor
+            DoEvents
+        End If
+    Next obj
+
+Saida:
+    On Error Resume Next
+    AtualizarGantt xlWb, wsChecklist
+    xlWb.Save
+    xlWb.Close False
+    If excelCriado Then xlApp.Quit
+    Exit Sub
+
+TrataErro:
+    MsgBox "Erro " & Err.Number & ": " & Err.Description, vbCritical
+    Resume Saida
+End Sub
+
+' ============================================================
+' INDIVIDUAL: SELEÇÃO
+' ============================================================
+Private Sub ProcessarSelecao_Individual(ByVal sel As Outlook.Selection)
+
+    On Error GoTo TrataErro
+
+    Dim xlApp As Object, xlWb As Object
+    Dim wsEmails As Object, wsChecklist As Object, wsDom As Object
+    Dim excelCriado As Boolean
+
+    Set xlApp = GetExcelApp(excelCriado)
+    xlApp.Visible = False
+    xlApp.DisplayAlerts = False
+
+    Set xlWb = xlApp.Workbooks.Open(CAMINHO_EXCEL)
+
+    Set wsEmails = EnsureSheet(xlWb, "EMAILS")
+    Set wsChecklist = EnsureSheet(xlWb, "CHECKLIST")
+    Set wsDom = EnsureSheet(xlWb, "DOMINIOS")
+
+    EnsureHeadersEmails wsEmails
+    EnsureHeadersChecklist wsChecklist
+    EnsureHeadersDominios wsDom
+
+    Dim obj As Object
+    For Each obj In sel
+        If TypeOf obj Is Outlook.MailItem Then
+            ProcessarUmMail_Core CTypeMail(obj), wsEmails, wsChecklist, True, "", ""
+            DoEvents
+        End If
+    Next obj
+
+Saida:
+    On Error Resume Next
+    AtualizarGantt xlWb, wsChecklist
+    xlWb.Save
+    xlWb.Close False
+    If excelCriado Then xlApp.Quit
+    Exit Sub
+
+TrataErro:
+    MsgBox "Erro " & Err.Number & ": " & Err.Description, vbCritical
+    Resume Saida
+End Sub
+
+' ============================================================
+' INDIVIDUAL: E-MAIL ABERTO
+' ============================================================
+Private Sub ProcessarUmMail_Individual(ByVal mail As Outlook.MailItem)
+
+    On Error GoTo TrataErro
+
+    Dim xlApp As Object, xlWb As Object
+    Dim wsEmails As Object, wsChecklist As Object, wsDom As Object
+    Dim excelCriado As Boolean
+
+    Set xlApp = GetExcelApp(excelCriado)
+    xlApp.Visible = False
+    xlApp.DisplayAlerts = False
+
+    Set xlWb = xlApp.Workbooks.Open(CAMINHO_EXCEL)
+
+    Set wsEmails = EnsureSheet(xlWb, "EMAILS")
+    Set wsChecklist = EnsureSheet(xlWb, "CHECKLIST")
+    Set wsDom = EnsureSheet(xlWb, "DOMINIOS")
+
+    EnsureHeadersEmails wsEmails
+    EnsureHeadersChecklist wsChecklist
+    EnsureHeadersDominios wsDom
+
+    ProcessarUmMail_Core mail, wsEmails, wsChecklist, True, "", ""
+
+Saida:
+    On Error Resume Next
+    AtualizarGantt xlWb, wsChecklist
+    xlWb.Save
+    xlWb.Close False
+    If excelCriado Then xlApp.Quit
+    Exit Sub
+
+TrataErro:
+    MsgBox "Erro " & Err.Number & ": " & Err.Description, vbCritical
+    Resume Saida
+End Sub
+
+' ============================================================
+' INDIVIDUAL: PASTA COMPLETA (TODOS)
+' ============================================================
+Private Sub ProcessarPastaCompleta_Individual(ByVal folder As Outlook.folder)
+
+    On Error GoTo TrataErro
+
+    Dim xlApp As Object, xlWb As Object
+    Dim wsEmails As Object, wsChecklist As Object, wsDom As Object
+    Dim excelCriado As Boolean
+
+    Set xlApp = GetExcelApp(excelCriado)
+    xlApp.Visible = False
+    xlApp.DisplayAlerts = False
+
+    Set xlWb = xlApp.Workbooks.Open(CAMINHO_EXCEL)
+
+    Set wsEmails = EnsureSheet(xlWb, "EMAILS")
+    Set wsChecklist = EnsureSheet(xlWb, "CHECKLIST")
+    Set wsDom = EnsureSheet(xlWb, "DOMINIOS")
+
+    EnsureHeadersEmails wsEmails
+    EnsureHeadersChecklist wsChecklist
+    EnsureHeadersDominios wsDom
+
+    Dim items As Outlook.items
+    Dim i As Long
+    Dim it As Object
+
+    Set items = folder.items
+
+    For i = items.Count To 1 Step -1
+        Set it = items.Item(i)
+        If TypeOf it Is Outlook.MailItem Then
+            ProcessarUmMail_Core CTypeMail(it), wsEmails, wsChecklist, True, "", ""
+            DoEvents
+        End If
+    Next i
+
+Saida:
+    On Error Resume Next
+    AtualizarGantt xlWb, wsChecklist
+    xlWb.Save
+    xlWb.Close False
+    If excelCriado Then xlApp.Quit
+    Exit Sub
+
+TrataErro:
+    MsgBox "Erro " & Err.Number & ": " & Err.Description, vbCritical
+    Resume Saida
+End Sub
+
+' ============================================================
+' MASSIVO: PROCESSA 1 E-MAIL COM TIPO/FORNECEDOR FIXOS
+' ============================================================
+Private Sub ProcessarUmMail_Massivo(ByVal mail As Outlook.MailItem, ByVal wsEmails As Object, ByVal wsChecklist As Object, ByVal tipoFixo As String, ByVal fornFixo As String)
+    ProcessarUmMail_Core mail, wsEmails, wsChecklist, False, tipoFixo, fornFixo
+End Sub
+
+' ============================================================
+' CORE: PROCESSA 1 E-MAIL (Grava + Checklist + Move)
+' ============================================================
+Private Sub ProcessarUmMail_Core(ByVal mail As Outlook.MailItem, ByVal wsEmails As Object, ByVal wsChecklist As Object, _
+                                ByVal perguntaIndividual As Boolean, ByVal tipoFixo As String, ByVal fornFixo As String)
+
+    On Error GoTo Falha
+
+    Dim linha As Long
+    linha = ProximaLinha(wsEmails, "A")
+
+    Dim remetenteEmail As String, remetenteNome As String, assunto As String
+    Dim dataEnvio As Variant
+    Dim usuarioWindows As String, usuarioOutlook As String
+    Dim IDcompleto As String
+
+    Dim valoresTexto As String, valorTotal As Double, temValor As String
+    Dim tipo As String, fornecedor As String
+    Dim criticidade As String, acaoSug As String
+    Dim vencISO As String
+
+    EnsureMoveColsAsText wsEmails
+
+    remetenteEmail = GetSmtpAddress(mail)
+    remetenteNome = mail.senderName
+    assunto = mail.subject
+    dataEnvio = mail.sentOn
+
+    usuarioWindows = Environ$("Username")
+    usuarioOutlook = Application.Session.CurrentUser
+
+    IDcompleto = LimparNomeArquivo(mail.entryId)
+
+    valoresTexto = ExtrairValoresReais(mail.Body & vbCrLf & assunto, valorTotal)
+    temValor = IIf(valoresTexto <> "", "Sim", "Não")
+
+    vencISO = ExtrairVencimentoISO(mail.Body & vbCrLf & assunto)
+
+    If perguntaIndividual Then
+        tipo = PromptTipo(assunto, remetenteEmail)
+        fornecedor = PromptFornecedor(assunto, remetenteEmail)
+    Else
+        tipo = tipoFixo
+        fornecedor = fornFixo
+    End If
+
+    If Trim$(tipo) = "" Then tipo = "OUTROS"
+    If Trim$(fornecedor) = "" Then fornecedor = "N/I"
+
+    criticidade = CriticidadePorTipo(tipo)
+    acaoSug = AcaoPorTipo(tipo)
+
+    wsEmails.Cells(linha, 1).Value = dataEnvio
+    wsEmails.Cells(linha, 2).Value = remetenteNome
+    wsEmails.Cells(linha, 3).Value = remetenteEmail
+    wsEmails.Cells(linha, 4).Value = assunto
+    wsEmails.Cells(linha, 5).Value = temValor
+    wsEmails.Cells(linha, 6).Value = valoresTexto
+    wsEmails.Cells(linha, 7).Value = valorTotal
+    wsEmails.Cells(linha, 8).Value = IDcompleto
+    wsEmails.Cells(linha, 9).Value = usuarioOutlook
+    wsEmails.Cells(linha, 10).Value = usuarioWindows
+    wsEmails.Cells(linha, 11).Value = fornecedor
+    wsEmails.Cells(linha, 12).Value = tipo
+    wsEmails.Cells(linha, 13).Value = criticidade
+    wsEmails.Cells(linha, 14).Value = vencISO
+
+    wsEmails.Cells(linha, 15).Value = "Recebido"
+    wsEmails.Cells(linha, 16).ClearContents
+    wsEmails.Cells(linha, 17).ClearContents
+    wsEmails.Cells(linha, 18).ClearContents
+    wsEmails.Cells(linha, 19).ClearContents
+
+    AppendChecklist wsChecklist, dataEnvio, fornecedor, tipo, criticidade, acaoSug, vencISO, "PENDENTE", remetenteEmail, assunto, IDcompleto
+
+    Dim pastaReg As Outlook.folder
+    Set pastaReg = GetTargetFolderSameStore(mail, OUTLOOK_FOLDER_REG)
+    If pastaReg Is Nothing Then Err.Raise 70, "MoverEmail", "Não foi possível criar/achar REGISTRADOS no mesmo mailbox."
+
+    mail.Move pastaReg
+
+    wsEmails.Cells(linha, 18).Value = "Movido"
+    wsEmails.Cells(linha, 19).Value = "Destino: " & pastaReg.folderPath & " | " & Format(Now, "yyyy-mm-dd hh:nn:ss")
+    Exit Sub
+
+Falha:
+    On Error Resume Next
+
+    Dim errNum As Long, errDesc As String
+    errNum = Err.Number
+    errDesc = Err.Description
+
+    Dim pastaFal As Outlook.folder
+    Set pastaFal = GetTargetFolderSameStore(mail, OUTLOOK_FOLDER_FAIL)
+    If Not pastaFal Is Nothing Then
+        mail.Move pastaFal
+    End If
+
+    On Error GoTo 0
+    On Error Resume Next
+
+    wsEmails.Cells(linha, 18).Value = "Falha"
+    wsEmails.Cells(linha, 19).Value = "Erro: " & errNum & " - " & errDesc & " | " & Format(Now, "yyyy-mm-dd hh:nn:ss")
+    On Error GoTo 0
+End Sub
+
+' ============================================================
+' PREVIEW DO LOTE
+' ============================================================
+Private Function BuildPreviewFromSelection(ByVal sel As Outlook.Selection, ByVal maxItens As Long) As String
+    Dim i As Long, c As Long
+    Dim obj As Object
+    Dim s As String
+
+    s = "Prévia dos primeiros itens:" & vbCrLf
+
+    c = 0
+    For i = 1 To sel.Count
+        Set obj = sel.Item(i)
+        If TypeOf obj Is Outlook.MailItem Then
+            c = c + 1
+            s = s & " - " & CTypeMail(obj).subject & vbCrLf
+            If c >= maxItens Then Exit For
+        End If
+    Next i
+
+    BuildPreviewFromSelection = s
+End Function
+
+' ============================================================
+' PROMPTS
+' ============================================================
+Private Function PromptTipo(ByVal assunto As String, ByVal email As String) As String
+    Dim msg As String, resp As String
+
+    msg = "Selecione o TIPO (Tela 1)" & vbCrLf & vbCrLf & _
+          "Remetente: " & email & vbCrLf & _
+          "Assunto/Contexto: " & assunto & vbCrLf & vbCrLf & _
+          "1 - BENEFICIOS" & vbCrLf & _
+          "2 - NF" & vbCrLf & _
+          "3 - FORNECEDORES" & vbCrLf & _
+          "4 - FOLHA" & vbCrLf & _
+          "5 - ENCARGOS" & vbCrLf & _
+          "6 - PONTO" & vbCrLf & _
+          "7 - OUTROS"
+
+    resp = Trim$(CStr(InputBox(msg, "Mapeamento - Tipo")))
+
+    Select Case resp
+        Case "1": PromptTipo = "BENEFICIOS"
+        Case "2": PromptTipo = "NF"
+        Case "3": PromptTipo = "FORNECEDORES"
+        Case "4": PromptTipo = "FOLHA"
+        Case "5": PromptTipo = "ENCARGOS"
+        Case "6": PromptTipo = "PONTO"
+        Case Else: PromptTipo = "OUTROS"
+    End Select
+End Function
+
+Private Function PromptFornecedor(ByVal assunto As String, ByVal email As String) As String
+    Dim fornecedores As Variant
+    fornecedores = GetListaFornecedores()
+
+    Dim msg As String, i As Long, resp As String, idx As Long
+
+    msg = "Selecione o FORNECEDOR (Tela 2)" & vbCrLf & vbCrLf & _
+          "Remetente: " & email & vbCrLf & _
+          "Assunto/Contexto: " & assunto & vbCrLf & vbCrLf
+
+    For i = LBound(fornecedores) To UBound(fornecedores)
+        msg = msg & (i + 1) & " - " & fornecedores(i) & vbCrLf
+    Next i
+
+    msg = msg & vbCrLf & "Digite o número. Se não estiver na lista, deixe em branco para digitar o nome."
+
+    resp = Trim$(CStr(InputBox(msg, "Mapeamento - Fornecedor")))
+
+    If resp = "" Then
+        PromptFornecedor = Trim$(CStr(InputBox("Fornecedor não listado. Digite o nome:", "Fornecedor", "N/I")))
+        Exit Function
+    End If
+
+    If IsNumeric(resp) Then
+        idx = CLng(resp) - 1
+        If idx >= LBound(fornecedores) And idx <= UBound(fornecedores) Then
+            PromptFornecedor = CStr(fornecedores(idx))
+        Else
+            PromptFornecedor = Trim$(CStr(InputBox("Número inválido. Digite o nome:", "Fornecedor", "N/I")))
+        End If
+    Else
+        PromptFornecedor = Trim$(CStr(InputBox("Entrada inválida. Digite o nome:", "Fornecedor", "N/I")))
+    End If
+End Function
+
+Private Function GetListaFornecedores() As Variant
+    GetListaFornecedores = Array( _
+        "VR", "Creche", "AM Médico", "VT", "Previdência", "Univers Drogaria", _
+        "Seguro de Vida", "Petlove", "Sonova Cuida", "Odonto", "Vale Caju e Ifood", _
+        "Wellhub", "Essence", "Cia Estágio", "ADP", "Soulan", "TV Corporativa", "Folha", "TRCT", "Case RH", "Frutas" _
+    )
+End Function
+
+' ============================================================
+' DATA ISO yyyy-mm-dd (extrai dd/mm/aaaa ou dd/mm/aa)
+' ============================================================
+Private Function ExtrairVencimentoISO(ByVal texto As String) As String
+    Dim re As Object, ms As Object, m As Object
+    Dim s As String
+    Dim dd As Integer, mm As Integer, yy As Integer
+    Dim parts() As String
+
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = True
+    re.IgnoreCase = True
+    re.Pattern = "(\b[0-3]?\d/[01]?\d/(\d{2}|\d{4})\b)"
+
+    If Not re.Test(texto) Then
+        ExtrairVencimentoISO = ""
+        Exit Function
+    End If
+
+    Set ms = re.Execute(texto)
+    Set m = ms(0)
+    s = m.Value
+
+    parts = Split(s, "/")
+    If UBound(parts) <> 2 Then
+        ExtrairVencimentoISO = ""
+        Exit Function
+    End If
+
+    dd = CInt(parts(0))
+    mm = CInt(parts(1))
+    yy = CInt(parts(2))
+    If yy < 100 Then yy = 2000 + yy
+
+    On Error Resume Next
+    ExtrairVencimentoISO = Format(DateSerial(yy, mm, dd), "yyyy-mm-dd")
+    If Err.Number <> 0 Then
+        Err.Clear
+        ExtrairVencimentoISO = ""
+    End If
+    On Error GoTo 0
+End Function
+
+' ============================================================
+' REGRAS SIMPLES
+' ============================================================
+Private Function CriticidadePorTipo(ByVal tipo As String) As String
+    Select Case UCase$(tipo)
+        Case "BENEFICIOS": CriticidadePorTipo = "ALTA"
+        Case "NF": CriticidadePorTipo = "ALTA"
+        Case "FORNECEDORES": CriticidadePorTipo = "MEDIA"
+        Case "FOLHA": CriticidadePorTipo = "ALTA"
+        Case "ENCARGOS": CriticidadePorTipo = "ALTA"
+        Case "PONTO": CriticidadePorTipo = "MEDIA"
+        Case "CHAMADOS_RH": CriticidadePorTipo = "MEDIA"
+        Case Else: CriticidadePorTipo = "MEDIA"
+    End Select
+End Function
+
+Private Function AcaoPorTipo(ByVal tipo As String) As String
+    Select Case UCase$(tipo)
+        Case "BENEFICIOS": AcaoPorTipo = "Validar cobrança e garantir pagamento"
+        Case "NF": AcaoPorTipo = "Registrar NF e garantir pagamento"
+        Case "FORNECEDORES": AcaoPorTipo = "Validar serviço e pagamento"
+        Case "FOLHA": AcaoPorTipo = "Conferir e executar rotina de folha"
+        Case "ENCARGOS": AcaoPorTipo = "Gerar e pagar encargos no prazo"
+        Case "PONTO": AcaoPorTipo = "Validar apontamentos e tratar pendências"
+        Case "CHAMADOS_RH": AcaoPorTipo = "Validar e tratar pendências"
+        Case Else: AcaoPorTipo = "Classificar e encaminhar"
+    End Select
+End Function
+
+' ============================================================
+' CHECKLIST
+' ============================================================
+Private Sub AppendChecklist(ByVal ws As Object, ByVal dtEmail As Variant, ByVal fornecedor As String, ByVal tipo As String, _
+                            ByVal criticidade As String, ByVal acao As String, ByVal vencISO As String, ByVal status As String, _
+                            ByVal remetente As String, ByVal assunto As String, ByVal entryId As String)
+
+    Dim r As Long
+    r = ProximaLinha(ws, "A")
+
+    ws.Cells(r, 1).Value = dtEmail
+    ws.Cells(r, 2).Value = fornecedor
+    ws.Cells(r, 3).Value = tipo
+    ws.Cells(r, 4).Value = criticidade
+    ws.Cells(r, 5).Value = acao
+    ws.Cells(r, 6).Value = vencISO
+    ws.Cells(r, 7).Value = status
+
+    ws.Cells(r, 8).Value = Format(Date, "yyyy-mm-dd") ' Inicio_ISO
+    ws.Cells(r, 9).Value = IIf(vencISO <> "", vencISO, Format(Date + 2, "yyyy-mm-dd")) ' Fim_ISO
+
+    ws.Cells(r, 10).Value = "" ' Dias
+    ws.Cells(r, 11).Value = remetente
+    ws.Cells(r, 12).Value = assunto
+    ws.Cells(r, 13).Value = entryId
+End Sub
+
+' ============================================================
+' OUTLOOK: mover para REGISTRADOS/FALHAS (MESMO MAILBOX)
+' ============================================================
+Private Function GetTargetFolderSameStore(ByVal mail As Outlook.MailItem, ByVal leafFolderName As String) As Outlook.folder
+    On Error GoTo Falha
+
+    Dim st As Outlook.Store
+    Dim inbox As Outlook.folder
+    Dim baseFolder As Outlook.folder
+    Dim target As Outlook.folder
+    Dim storeId As String
+
+    storeId = mail.Parent.storeId
+
+    For Each st In Application.Session.Stores
+        If st.storeId = storeId Then
+            Set inbox = st.GetDefaultFolder(olFolderInbox)
+            Set baseFolder = GetOrCreateSubFolder(inbox, OUTLOOK_FOLDER_BASE)
+            Set target = GetOrCreateSubFolder(baseFolder, leafFolderName)
+            Set GetTargetFolderSameStore = target
+            Exit Function
+        End If
+    Next st
+
+    Set GetTargetFolderSameStore = Nothing
+    Exit Function
+
+Falha:
+    Set GetTargetFolderSameStore = Nothing
+End Function
+
+Private Function GetOrCreateSubFolder(ByVal parentFolder As Outlook.folder, ByVal Name As String) As Outlook.folder
+    Dim f As Outlook.folder
+    On Error Resume Next
+    Set f = parentFolder.Folders(Name)
+    On Error GoTo 0
+    If f Is Nothing Then Set f = parentFolder.Folders.Add(Name)
+    Set GetOrCreateSubFolder = f
+End Function
+
+' ============================================================
+' EXCEL HELPERS
+' ============================================================
+Private Function GetExcelApp(ByRef created As Boolean) As Object
+    Dim xl As Object
+    created = False
+    On Error Resume Next
+    Set xl = GetObject(, "Excel.Application")
+    On Error GoTo 0
+    If xl Is Nothing Then
+        Set xl = CreateObject("Excel.Application")
+        created = True
+    End If
+    Set GetExcelApp = xl
+End Function
+
+Private Function EnsureSheet(ByVal wb As Object, ByVal sheetName As String) As Object
+    On Error Resume Next
+    Set EnsureSheet = wb.Worksheets(sheetName)
+    On Error GoTo 0
+    If EnsureSheet Is Nothing Then
+        Set EnsureSheet = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+        EnsureSheet.Name = sheetName
+    End If
+End Function
+
+Private Function ProximaLinha(ByVal ws As Object, ByVal col As String) As Long
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, col).End(-4162).Row ' xlUp
+    If lastRow < 2 Then
+        ProximaLinha = 2
+    Else
+        ProximaLinha = lastRow + 1
+    End If
+End Function
+
+Private Sub EnsureHeadersEmails(ByVal ws As Object)
+    If ws.Cells(1, 1).Value <> "" Then
+        EnsureMoveColsAsText ws
+        Exit Sub
+    End If
+
+    ws.Cells(1, 1).Value = "DataEnvio"
+    ws.Cells(1, 2).Value = "RemetenteNome"
+    ws.Cells(1, 3).Value = "RemetenteEmail"
+    ws.Cells(1, 4).Value = "Assunto"
+    ws.Cells(1, 5).Value = "TemValor"
+    ws.Cells(1, 6).Value = "ValoresLista"
+    ws.Cells(1, 7).Value = "ValorTotal"
+    ws.Cells(1, 8).Value = "EntryID_Limpo"
+    ws.Cells(1, 9).Value = "UsuarioOutlook"
+    ws.Cells(1, 10).Value = "UsuarioWindows"
+    ws.Cells(1, 11).Value = "Fornecedor"
+    ws.Cells(1, 12).Value = "Tipo"
+    ws.Cells(1, 13).Value = "Criticidade"
+    ws.Cells(1, 14).Value = "Vencimento_ISO"
+    ws.Cells(1, 15).Value = "Status"
+    ws.Cells(1, 16).Value = "DataPagamento"
+    ws.Cells(1, 17).Value = "Obs"
+    ws.Cells(1, 18).Value = "MoveStatus"
+    ws.Cells(1, 19).Value = "MoveLog"
+
+    EnsureMoveColsAsText ws
+End Sub
+
+Private Sub EnsureHeadersChecklist(ByVal ws As Object)
+    If ws.Cells(1, 1).Value <> "" Then Exit Sub
+
+    ws.Cells(1, 1).Value = "DataEmail"
+    ws.Cells(1, 2).Value = "Fornecedor"
+    ws.Cells(1, 3).Value = "Tipo"
+    ws.Cells(1, 4).Value = "Criticidade"
+    ws.Cells(1, 5).Value = "Acao"
+    ws.Cells(1, 6).Value = "Vencimento_ISO"
+    ws.Cells(1, 7).Value = "Status"
+    ws.Cells(1, 8).Value = "Inicio_ISO"
+    ws.Cells(1, 9).Value = "Fim_ISO"
+    ws.Cells(1, 10).Value = "Dias"
+    ws.Cells(1, 11).Value = "Remetente"
+    ws.Cells(1, 12).Value = "Assunto"
+    ws.Cells(1, 13).Value = "EntryID"
+End Sub
+
+Private Sub EnsureHeadersDominios(ByVal ws As Object)
+    If ws.Cells(1, 1).Value <> "" Then Exit Sub
+
+    ws.Cells(1, 1).Value = "dominio_token"
+    ws.Cells(1, 2).Value = "fornecedor"
+    ws.Cells(1, 3).Value = "tipo"
+    ws.Cells(1, 4).Value = "criticidade"
+    ws.Cells(1, 5).Value = "acao_sugerida"
+End Sub
+
+' ============================================================
+' FORÇA COLUNAS MoveStatus/MoveLog COMO TEXTO (evita 0)
+' ============================================================
+Private Sub EnsureMoveColsAsText(ByVal ws As Object)
+    On Error Resume Next
+    ws.Columns(15).NumberFormat = "@"
+    ws.Columns(16).NumberFormat = "@"
+    ws.Columns(17).NumberFormat = "@"
+    ws.Columns(18).NumberFormat = "@"
+    ws.Columns(19).NumberFormat = "@"
+    On Error GoTo 0
+End Sub
+
+' ============================================================
+' EXTRAI VALORES
+' ============================================================
+Private Function ExtrairValoresReais(ByVal texto As String, ByRef soma As Double) As String
+    Dim regex As Object, matches As Object, m As Object
+    Dim lista As String
+    Dim strVal As String, numVal As Double
+
+    soma = 0
+    lista = ""
+
+    Set regex = CreateObject("VBScript.RegExp")
+    regex.Global = True
+    regex.IgnoreCase = True
+    regex.Pattern = "([0-9]{1,3}(\.[0-9]{3})*|[0-9]+),[0-9]{2}"
+
+    If Not regex.Test(texto) Then
+        ExtrairValoresReais = ""
+        Exit Function
+    End If
+
+    Set matches = regex.Execute(texto)
+
+    For Each m In matches
+        strVal = m.Value
+        If lista = "" Then lista = strVal Else lista = lista & "; " & strVal
+
+        strVal = Replace(strVal, ".", "")
+        strVal = Replace(strVal, ",", ".")
+
+        If IsNumeric(strVal) Then
+            numVal = CDbl(strVal)
+            soma = soma + numVal
+        End If
+    Next m
+
+    ExtrairValoresReais = lista
+End Function
+
+' ============================================================
+' SMTP
+' ============================================================
+Private Function GetSmtpAddress(ByVal mail As Outlook.MailItem) As String
+    On Error Resume Next
+    If mail.SenderEmailType = "EX" Then
+        GetSmtpAddress = mail.Sender.GetExchangeUser().PrimarySmtpAddress
+    Else
+        GetSmtpAddress = mail.SenderEmailAddress
+    End If
+    On Error GoTo 0
+End Function
+
+' ============================================================
+' LIMPA ENTRYID
+' ============================================================
+Private Function LimparNomeArquivo(ByVal s As String) As String
+    Dim invalid As String: invalid = "/\:*?""<>|"
+    Dim i As Long
+
+    For i = 1 To Len(invalid)
+        s = Replace(s, Mid(invalid, i, 1), "_")
+    Next i
+
+    s = Replace(s, Chr(160), "_")
+    s = Replace(s, Chr(9), "_")
+    s = Replace(s, Chr(10), "_")
+    s = Replace(s, Chr(13), "_")
+    s = Replace(s, ChrW(8203), "_")
+    s = Replace(s, ChrW(65279), "_")
+
+    LimparNomeArquivo = Trim$(s)
+End Function
+
+' ============================================================
+' CAST
+' ============================================================
+Private Function CTypeMail(ByVal obj As Object) As Outlook.MailItem
+    Set CTypeMail = obj
+End Function
+
+' ============================================================
+' GANTT (ABA) - POR SEMANA - CORES SONOVA
+' Agora com coluna Assunto e altura das linhas = 15
+' + Formatação Condicional interna (sem depender de macro futura)
+' ============================================================
+
+' Cores
+Private Function SonovaNavy() As Long: SonovaNavy = RGB(18, 28, 78): End Function
+Private Function SonovaBlue() As Long: SonovaBlue = RGB(0, 74, 153): End Function
+Private Function SonovaLightBlue() As Long: SonovaLightBlue = RGB(230, 238, 250): End Function
+Private Function SonovaGreen() As Long: SonovaGreen = RGB(0, 168, 143): End Function
+Private Function SonovaOrange() As Long: SonovaOrange = RGB(245, 166, 35): End Function
+Private Function SonovaRed() As Long: SonovaRed = RGB(220, 53, 69): End Function
+Private Function SonovaGray() As Long: SonovaGray = RGB(242, 242, 242): End Function
+Private Function SonovaDarkGray() As Long: SonovaDarkGray = RGB(80, 80, 80): End Function
+
+Public Sub AtualizarGantt(ByVal wb As Object, ByVal wsChecklist As Object)
+    On Error GoTo TrataErro
+
+    Dim wsGantt As Object
+    Set wsGantt = EnsureSheet(wb, GANTT_SHEET_NAME)
+
+    MontarGantt_FromChecklist wsChecklist, wsGantt
+
+    Exit Sub
+TrataErro:
+    Debug.Print "AtualizarGantt erro " & Err.Number & ": " & Err.Description
+End Sub
+
+Private Sub MontarGantt_FromChecklist(ByVal wsChecklist As Object, ByVal wsGantt As Object)
+    On Error GoTo TrataErro
+
+    Dim lastRow As Long
+    lastRow = wsChecklist.Cells(wsChecklist.Rows.Count, "A").End(-4162).Row
+    If lastRow < 2 Then
+        PrepararLayoutGanttVazio wsGantt
+        Exit Sub
+    End If
+
+    Dim r As Long
+    Dim dtIni As Date, dtFim As Date
+    Dim dtMin As Date, dtMax As Date
+    Dim haveDate As Boolean
+
+    haveDate = False
+    For r = 2 To lastRow
+        If TryParseISODate(wsChecklist.Cells(r, 8).Value, dtIni) Then
+            If Not haveDate Then
+                dtMin = dtIni: dtMax = dtIni: haveDate = True
+            Else
+                If dtIni < dtMin Then dtMin = dtIni
+                If dtIni > dtMax Then dtMax = dtIni
+            End If
+        End If
+
+        If TryParseISODate(wsChecklist.Cells(r, 9).Value, dtFim) Then
+            If Not haveDate Then
+                dtMin = dtFim: dtMax = dtFim: haveDate = True
+            Else
+                If dtFim < dtMin Then dtMin = dtFim
+                If dtFim > dtMax Then dtMax = dtFim
+            End If
+        End If
+    Next r
+
+    If Not haveDate Then
+        dtMin = Date
+        dtMax = Date + 28
+    End If
+
+    Dim startWeek As Date, endWeek As Date
+    startWeek = WeekStartMonday(dtMin)
+    endWeek = WeekStartMonday(dtMax)
+
+    If endWeek < startWeek + (7 * 7) Then endWeek = startWeek + (7 * 7)
+
+    wsGantt.Cells.Clear
+    MontarCabecalhoGantt wsGantt, startWeek, endWeek
+
+    Dim outRow As Long
+    outRow = 5
+
+    For r = 2 To lastRow
+
+        Dim fornecedor As String, tipo As String, criticidade As String, acao As String
+        Dim vencISO As String, status As String, assunto As String
+
+        fornecedor = CStr(wsChecklist.Cells(r, 2).Value)
+        tipo = CStr(wsChecklist.Cells(r, 3).Value)
+        criticidade = CStr(wsChecklist.Cells(r, 4).Value)
+        acao = CStr(wsChecklist.Cells(r, 5).Value)
+        vencISO = CStr(wsChecklist.Cells(r, 6).Value)
+        status = CStr(wsChecklist.Cells(r, 7).Value)
+        assunto = CStr(wsChecklist.Cells(r, 12).Value)
+
+        If Not TryParseISODate(wsChecklist.Cells(r, 8).Value, dtIni) Then dtIni = startWeek
+        If Not TryParseISODate(wsChecklist.Cells(r, 9).Value, dtFim) Then
+            If TryParseISODate(vencISO, dtFim) Then
+            Else
+                dtFim = dtIni + 7
+            End If
+        End If
+        If dtFim < dtIni Then dtFim = dtIni
+
+        ' Colunas fixas (A..G)
+        wsGantt.Cells(outRow, 1).Value = fornecedor
+        wsGantt.Cells(outRow, 2).Value = tipo
+        wsGantt.Cells(outRow, 3).Value = criticidade
+        wsGantt.Cells(outRow, 4).Value = acao
+        wsGantt.Cells(outRow, 5).Value = assunto
+
+        Dim dtVenc As Date
+        If TryParseISODate(vencISO, dtVenc) Then
+            wsGantt.Cells(outRow, 6).NumberFormat = "dd/mm/yyyy"
+            wsGantt.Cells(outRow, 6).Value = dtVenc
+        Else
+            wsGantt.Cells(outRow, 6).NumberFormat = "@"
+            wsGantt.Cells(outRow, 6).Value = vencISO
+        End If
+
+        wsGantt.Cells(outRow, 7).Value = status
+
+        ' Semanas começam em H (8)
+        PintarBarrasSemanais wsGantt, outRow, dtIni, dtFim, startWeek, status, criticidade, vencISO
+
+        outRow = outRow + 1
+    Next r
+
+    FinalizarGanttLayout wsGantt, outRow - 1
+
+    Exit Sub
+
+TrataErro:
+    Debug.Print "MontarGantt_FromChecklist erro " & Err.Number & ": " & Err.Description
+End Sub
+
+Private Sub PrepararLayoutGanttVazio(ByVal ws As Object)
+    ws.Cells.Clear
+    ws.Range("A1").Value = "GANTT - DP Triagem"
+    ws.Range("A1").Font.Bold = True
+    ws.Range("A1").Font.Size = 14
+    ws.Range("A1").Interior.Color = SonovaNavy()
+    ws.Range("A1").Font.Color = vbWhite
+    ws.Range("A3").Value = "Sem dados no CHECKLIST."
+End Sub
+
+Private Sub MontarCabecalhoGantt(ByVal ws As Object, ByVal startWeek As Date, ByVal endWeek As Date)
+
+    ws.Range("A1").Value = "GANTT - DP Triagem (por semana)"
+    ws.Range("A1:G1").Merge
+    ws.Range("A1").Font.Bold = True
+    ws.Range("A1").Font.Size = 14
+    ws.Range("A1").Interior.Color = SonovaNavy()
+    ws.Range("A1").Font.Color = vbWhite
+    ws.Rows(1).RowHeight = 26
+
+    ws.Range("A2").Value = "Legenda:"
+    ws.Range("A2").Font.Bold = True
+
+    ws.Range("B2").Value = "Concluído"
+    ws.Range("B2").Interior.Color = SonovaGreen()
+    ws.Range("B2").Font.Color = vbWhite
+
+    ws.Range("C2").Value = "Pendente"
+    ws.Range("C2").Interior.Color = SonovaBlue()
+    ws.Range("C2").Font.Color = vbWhite
+
+    ws.Range("D2").Value = "Atrasado"
+    ws.Range("D2").Interior.Color = SonovaRed()
+    ws.Range("D2").Font.Color = vbWhite
+
+    ws.Range("E2").Value = "Alerta"
+    ws.Range("E2").Interior.Color = SonovaOrange()
+    ws.Range("E2").Font.Color = vbWhite
+
+    ws.Range("F2").Value = "Neutro"
+    ws.Range("F2").Interior.Color = SonovaGray()
+    ws.Range("F2").Font.Color = SonovaDarkGray()
+
+    ws.Rows(2).RowHeight = 18
+
+    ' Cabeçalho fixo (linha 4)
+    ws.Range("A4").Value = "Fornecedor"
+    ws.Range("B4").Value = "Tipo"
+    ws.Range("C4").Value = "Criticidade"
+    ws.Range("D4").Value = "Ação"
+    ws.Range("E4").Value = "Assunto"
+    ws.Range("F4").Value = "Vencimento"
+    ws.Range("G4").Value = "Status"
+
+    ws.Range("A4:G4").Font.Bold = True
+    ws.Range("A4:G4").Interior.Color = SonovaLightBlue()
+    ws.Range("A4:G4").Font.Color = SonovaNavy()
+    ws.Rows(4).RowHeight = 20
+
+    Dim col As Long
+    col = 8 ' semanas começam em H
+
+    Dim d As Date
+    d = startWeek
+    Do While d <= endWeek
+        ws.Cells(4, col).Value = "Sem " & Format(d, "dd/mm") & " - " & Format(d + 6, "dd/mm")
+        ws.Cells(4, col).Font.Bold = True
+        ws.Cells(4, col).Interior.Color = SonovaLightBlue()
+        ws.Cells(4, col).Font.Color = SonovaNavy()
+        ws.Cells(4, col).HorizontalAlignment = -4108
+        ws.Columns(col).ColumnWidth = 16
+        col = col + 1
+        d = d + 7
+    Loop
+
+    ' Larguras colunas fixas
+    ws.Columns("A").ColumnWidth = 18
+    ws.Columns("B").ColumnWidth = 14
+    ws.Columns("C").ColumnWidth = 12
+    ws.Columns("D").ColumnWidth = 38
+    ws.Columns("E").ColumnWidth = 55
+    ws.Columns("F").ColumnWidth = 12
+    ws.Columns("G").ColumnWidth = 12
+End Sub
+
+Private Sub PintarBarrasSemanais(ByVal ws As Object, ByVal outRow As Long, ByVal dtIni As Date, ByVal dtFim As Date, _
+                                ByVal startWeek As Date, ByVal status As String, ByVal criticidade As String, ByVal vencISO As String)
+
+    Dim cor As Long
+    cor = CorPorStatusECriticidade(status, criticidade, vencISO)
+
+    Dim colStart As Long, colEnd As Long
+    colStart = 8 + CLng((WeekStartMonday(dtIni) - startWeek) / 7)
+    colEnd = 8 + CLng((WeekStartMonday(dtFim) - startWeek) / 7)
+
+    If colStart < 8 Then colStart = 8
+    If colEnd < 8 Then colEnd = 8
+    If colEnd < colStart Then colEnd = colStart
+
+    Dim c As Long
+    For c = colStart To colEnd
+        ws.Cells(outRow, c).Interior.Color = cor
+        ws.Cells(outRow, c).Value = 1          ' IMPORTANTE p/ formatação condicional
+        ws.Cells(outRow, c).NumberFormat = ";;;" ' esconde o 1
+    Next c
+
+    If (outRow Mod 2) = 0 Then
+        Dim lastCol As Long
+        lastCol = ws.Cells(4, ws.Columns.Count).End(-4159).Column
+
+        ws.Range(ws.Cells(outRow, 1), ws.Cells(outRow, lastCol)).Interior.Color = RGB(255, 255, 255)
+
+        For c = colStart To colEnd
+            ws.Cells(outRow, c).Interior.Color = cor
+            ws.Cells(outRow, c).Value = 1
+            ws.Cells(outRow, c).NumberFormat = ";;;"
+        Next c
+    End If
+End Sub
+
+Private Function CorPorStatusECriticidade(ByVal status As String, ByVal criticidade As String, ByVal vencISO As String) As Long
+
+    Dim st As String
+    st = UCase$(Trim$(status))
+    If st = "" Then st = "PENDENTE"
+
+    Dim dtVenc As Date
+    Dim hasVenc As Boolean
+    hasVenc = TryParseISODate(vencISO, dtVenc)
+
+    If hasVenc Then
+        If Date > dtVenc Then
+            If InStr(1, st, "CONCL", vbTextCompare) = 0 And InStr(1, st, "PAGO", vbTextCompare) = 0 And InStr(1, st, "OK", vbTextCompare) = 0 Then
+                st = "ATRASADO"
+            End If
+        End If
+    End If
+
+    Select Case True
+        Case (InStr(1, st, "CONCL", vbTextCompare) > 0) Or (InStr(1, st, "PAGO", vbTextCompare) > 0) Or (InStr(1, st, "OK", vbTextCompare) > 0)
+            CorPorStatusECriticidade = SonovaGreen()
+
+        Case (InStr(1, st, "ATRAS", vbTextCompare) > 0) Or (InStr(1, st, "VENC", vbTextCompare) > 0)
+            CorPorStatusECriticidade = SonovaRed()
+
+        Case UCase$(Trim$(criticidade)) = "ALTA"
+            CorPorStatusECriticidade = SonovaOrange()
+
+        Case (InStr(1, st, "PEND", vbTextCompare) > 0) Or (InStr(1, st, "EM AND", vbTextCompare) > 0)
+            CorPorStatusECriticidade = SonovaBlue()
+
+        Case Else
+            CorPorStatusECriticidade = SonovaGray()
+    End Select
+End Function
+
+Private Sub FinalizarGanttLayout(ByVal ws As Object, ByVal lastDataRow As Long)
+
+    Dim lastCol As Long
+    lastCol = ws.Cells(4, ws.Columns.Count).End(-4159).Column
+    If lastDataRow < 5 Then lastDataRow = 5
+
+    With ws.Range(ws.Cells(4, 1), ws.Cells(lastDataRow, lastCol)).Borders
+        .LineStyle = 1
+        .Color = RGB(220, 220, 220)
+        .Weight = 2
+    End With
+
+    ' Semanas (H..)
+    ws.Range(ws.Cells(5, 8), ws.Cells(lastDataRow, lastCol)).HorizontalAlignment = -4108
+    ws.Range(ws.Cells(5, 8), ws.Cells(lastDataRow, lastCol)).VerticalAlignment = -4108
+
+    ' Fixas (A..G)
+    ws.Range(ws.Cells(5, 1), ws.Cells(lastDataRow, 7)).VerticalAlignment = -4160
+    ws.Range(ws.Cells(5, 4), ws.Cells(lastDataRow, 5)).WrapText = True ' ação + assunto
+
+    ws.Activate
+    ws.Range("H5").Select
+    On Error Resume Next
+    ActiveWindow.FreezePanes = False
+    ActiveWindow.FreezePanes = True
+    On Error GoTo 0
+
+    ws.Rows(3).RowHeight = 8
+    ws.Rows("5:" & lastDataRow).RowHeight = 15
+    ws.Range("A1").Select
+
+    ' APLICA FORMATAÇÃO CONDICIONAL INTERNA (dinâmica com HOJE())
+    AplicarFormatacaoCondicionalGantt ws, lastDataRow, lastCol
+
+End Sub
+
+Private Function WeekStartMonday(ByVal d As Date) As Date
+    WeekStartMonday = d - (Weekday(d, vbMonday) - 1)
+End Function
+
+Private Function TryParseISODate(ByVal v As Variant, ByRef outDate As Date) As Boolean
+    On Error GoTo Falha
+
+    Dim s As String
+    s = Trim$(CStr(v))
+    If s = "" Then
+        TryParseISODate = False
+        Exit Function
+    End If
+
+    If Len(s) >= 10 Then
+        Dim yy As Integer, mm As Integer, dd As Integer
+        yy = CInt(Mid$(s, 1, 4))
+        mm = CInt(Mid$(s, 6, 2))
+        dd = CInt(Mid$(s, 9, 2))
+        outDate = DateSerial(yy, mm, dd)
+        TryParseISODate = True
+        Exit Function
+    End If
+
+Falha:
+    TryParseISODate = False
+End Function
+
+' ============================================================
+' FORMATAÇÃO CONDICIONAL DO GANTT (sem "Range As Range" etc.)
+' Objetivo: manter cor dinâmica (ex.: 3 dias antes do vencimento)
+' ============================================================
+Private Sub AplicarFormatacaoCondicionalGantt(ByVal ws As Object, ByVal lastRow As Long, ByVal lastCol As Long)
+
+    On Error GoTo TrataErro
+
+    If lastRow < 5 Then Exit Sub
+    If lastCol < 8 Then Exit Sub
+
+    Dim rng As Object
+    Set rng = ws.Range(ws.Cells(5, 8), ws.Cells(lastRow, lastCol)) ' H5..última
+
+    ' Apaga regras antigas
+    rng.FormatConditions.Delete
+
+    ' Esconde o "1" (barra) caso alguma célula fique visível
+    rng.NumberFormat = ";;;"
+
+    Dim fc As Object
+
+    ' 1) Concluído (prioridade máxima)
+    Set fc = rng.FormatConditions.Add(Type:=2, Formula1:="=1=1")
+    fc.FormulaLocal = "=(H5=1)*OU($G5=""CONCLUIDO"";$G5=""CONCLUÍDO"";$G5=""PAGO"";$G5=""OK"")"
+    fc.Interior.Color = SonovaGreen()
+    fc.StopIfTrue = True
+
+    ' 2) Atrasado (HOJE > vencimento) e não concluído
+    Set fc = rng.FormatConditions.Add(Type:=2, Formula1:="=1=1")
+    fc.FormulaLocal = "=(H5=1)*E(ÉNÚM($F5);HOJE()>$F5;NÃO(OU($G5=""CONCLUIDO"";$G5=""CONCLUÍDO"";$G5=""PAGO"";$G5=""OK"")))"
+    fc.Interior.Color = SonovaRed()
+    fc.StopIfTrue = True
+
+    ' 3) Alerta (3 dias antes até o vencimento) e não concluído
+    Set fc = rng.FormatConditions.Add(Type:=2, Formula1:="=1=1")
+    fc.FormulaLocal = "=(H5=1)*E(ÉNÚM($F5);HOJE()>=$F5-3;HOJE()<=$F5;NÃO(OU($G5=""CONCLUIDO"";$G5=""CONCLUÍDO"";$G5=""PAGO"";$G5=""OK"")))"
+    fc.Interior.Color = SonovaOrange()
+    fc.StopIfTrue = True
+
+    ' 4) Pendente (tem barra e não caiu nas regras acima)
+    Set fc = rng.FormatConditions.Add(Type:=2, Formula1:="=1=1")
+    fc.FormulaLocal = "=(H5=1)*OU(ÉCÉL.VAZIA($G5);$G5=""PENDENTE"";$G5=""EM ANDAMENTO"";$G5=""EM AND"";$G5=""EM ANDAM"")"
+    fc.Interior.Color = SonovaBlue()
+    fc.StopIfTrue = True
+
+    ' 5) Neutro (fallback: só onde há barra)
+    Set fc = rng.FormatConditions.Add(Type:=2, Formula1:="=1=1")
+    fc.FormulaLocal = "=(H5=1)"
+    fc.Interior.Color = SonovaGray()
+    fc.StopIfTrue = True
+
+    Exit Sub
+
+TrataErro:
+    Debug.Print "AplicarFormatacaoCondicionalGantt erro " & Err.Number & ": " & Err.Description
+End Sub
+
