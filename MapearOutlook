@@ -15,7 +15,7 @@ Private Const GANTT_SHEET_NAME As String = "GANTT"
 ' ============================================================
 ' ENTRADA PRINCIPAL
 ' ============================================================
-Public Sub aayMapearEmails_DP()
+Public Sub amsMapearEmails_DP()
 
     On Error GoTo TrataErro
 
@@ -1126,13 +1126,11 @@ Private Sub FinalizarGanttLayout(ByVal ws As Object, ByVal lastDataRow As Long)
         .Weight = 2
     End With
 
-    ' Semanas (H..)
     ws.Range(ws.Cells(5, 8), ws.Cells(lastDataRow, lastCol)).HorizontalAlignment = -4108
     ws.Range(ws.Cells(5, 8), ws.Cells(lastDataRow, lastCol)).VerticalAlignment = -4108
 
-    ' Fixas (A..G)
     ws.Range(ws.Cells(5, 1), ws.Cells(lastDataRow, 7)).VerticalAlignment = -4160
-    ws.Range(ws.Cells(5, 4), ws.Cells(lastDataRow, 5)).WrapText = True ' ação + assunto
+    ws.Range(ws.Cells(5, 4), ws.Cells(lastDataRow, 5)).WrapText = True
 
     ws.Activate
     ws.Range("H5").Select
@@ -1145,9 +1143,41 @@ Private Sub FinalizarGanttLayout(ByVal ws As Object, ByVal lastDataRow As Long)
     ws.Rows("5:" & lastDataRow).RowHeight = 15
     ws.Range("A1").Select
 
-    ' APLICA FORMATAÇÃO CONDICIONAL INTERNA (dinâmica com HOJE())
+    ' Formatação condicional das barras (H..)
     AplicarFormatacaoCondicionalGantt ws, lastDataRow, lastCol
 
+    ' NOVA: formatação condicional da coluna F (Vencimento)
+    AplicarFormatacaoCondicionalColunaF_Vencimento ws, lastDataRow
+
+End Sub
+
+
+Private Sub AplicarFormatacaoCondicionalColunaF_Vencimento(ByVal ws As Object, ByVal lastRow As Long)
+
+    On Error GoTo TrataErro
+    If lastRow < 5 Then Exit Sub
+
+    Dim rngF As Object
+    Set rngF = ws.Range(ws.Cells(5, 6), ws.Cells(lastRow, 6)) ' F5:F...
+
+    ' Remove regras antigas (somente na área de dados)
+    rngF.FormatConditions.Delete
+
+    Dim fc As Object
+
+    ' Regra: F não vazia e data (texto) < HOJE()
+    Set fc = rngF.FormatConditions.Add( _
+                Type:=2, _
+                Formula1:="=E(ARRUMAR($F5)<>"""";SEERRO(DATA.VALOR(ARRUMAR($F5));0)<HOJE())" _
+            )
+    fc.Interior.Color = SonovaRed()
+    fc.Font.Color = vbWhite
+    fc.StopIfTrue = True
+
+    Exit Sub
+
+TrataErro:
+    Debug.Print "AplicarFormatacaoCondicionalColunaF_Vencimento erro " & Err.Number & ": " & Err.Description
 End Sub
 
 Private Function WeekStartMonday(ByVal d As Date) As Date
