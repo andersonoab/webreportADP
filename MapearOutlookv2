@@ -1,7 +1,7 @@
 Option Explicit
 
 ' ============================================================
-' CONFIG
+' CONFIG-=E(ARRUMAR($F5)<>"";SEERRO(DATA.VALOR(ARRUMAR($F5));0)<HOJE())
 ' ============================================================
 
 Private Const CAMINHO_EXCEL As String = "C:\_RPA\AppMacro\_email_rh.xlsx"
